@@ -1,0 +1,9 @@
+{
+  "/live-monitor/page": "app/live-monitor/page.js",
+  "/page": "app/page.js",
+  "/alerts/page": "app/alerts/page.js",
+  "/analytics/page": "app/analytics/page.js",
+  "/settings/page": "app/settings/page.js",
+  "/ai-summary/page": "app/ai-summary/page.js",
+  "/medication/page": "app/medication/page.js"
+}
