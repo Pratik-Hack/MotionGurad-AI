@@ -6,6 +6,7 @@ from passlib.context import CryptContext
 from fastapi import HTTPException, status, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from app.config import settings
+from app.models import UserRole
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer(auto_error=False)
@@ -33,7 +34,37 @@ def decode_token(token: str) -> dict:
         )
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """Get current authenticated user from token."""
     if credentials is None:
-        # Allow unauthenticated access for demo mode
-        return {"sub": "demo@motionguard.ai", "role": "Doctor", "name": "Dr. Sarah Chen"}
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated"
+        )
     return decode_token(credentials.credentials)
+
+async def get_current_doctor(current_user: dict = Depends(get_current_user)):
+    """Verify current user is a doctor."""
+    if current_user.get("role") != "Doctor":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only doctors can access this resource"
+        )
+    return current_user
+
+async def get_current_patient(current_user: dict = Depends(get_current_user)):
+    """Verify current user is a patient."""
+    if current_user.get("role") != "Patient":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only patients can access this resource"
+        )
+    return current_user
+
+def get_current_user_optional(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """Get current user but allow unauthenticated access for demo."""
+    if credentials is None:
+        return None
+    try:
+        return decode_token(credentials.credentials)
+    except:
+        return None

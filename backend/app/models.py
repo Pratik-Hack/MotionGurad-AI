@@ -28,35 +28,91 @@ class AlertStatus(str, Enum):
 
 class UserRole(str, Enum):
     DOCTOR = "Doctor"
+    PATIENT = "Patient"
     ADMIN = "Admin"
     CAREGIVER = "Caregiver"
     VIEWER = "Viewer"
 
 # ─── Auth ──────────────────────────────────────────────────
-class UserCreate(BaseModel):
-    email: str
-    password: str
-    name: str
-    role: UserRole = UserRole.DOCTOR
-    specialty: Optional[str] = None
-    institution: Optional[str] = None
-
 class UserLogin(BaseModel):
     email: str
     password: str
-
-class UserResponse(BaseModel):
-    id: str
-    email: str
-    name: str
     role: UserRole
-    specialty: Optional[str] = None
-    institution: Optional[str] = None
-    avatar_url: Optional[str] = None
 
 class Token(BaseModel):
     access_token: str
     token_type: str = "bearer"
+    user: "UserResponse"
+
+class UserResponse(BaseModel):
+    id: Optional[str] = None
+    email: str
+    name: str
+    role: UserRole
+    avatar_url: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+# ─── Doctor Models ─────────────────────────────────────────
+class DoctorRegister(BaseModel):
+    email: str
+    password: str
+    name: str
+    specialty: str
+    license_number: str
+    institution: Optional[str] = None
+    phone: Optional[str] = None
+
+class DoctorProfile(BaseModel):
+    id: Optional[str] = None
+    email: str
+    name: str
+    specialty: str
+    license_number: str
+    institution: Optional[str] = None
+    phone: Optional[str] = None
+    avatar_url: Optional[str] = None
+    created_at: Optional[datetime] = None
+    patients_count: int = 0
+
+class DoctorUpdate(BaseModel):
+    name: Optional[str] = None
+    specialty: Optional[str] = None
+    institution: Optional[str] = None
+    phone: Optional[str] = None
+    avatar_url: Optional[str] = None
+
+# ─── Patient Models ────────────────────────────────────────
+class PatientRegister(BaseModel):
+    email: str
+    password: str
+    name: str
+    age: int
+    medical_conditions: Optional[List[str]] = None
+    emergency_contact: Optional[str] = None
+    emergency_phone: Optional[str] = None
+    phone: Optional[str] = None
+
+class PatientProfile(BaseModel):
+    id: Optional[str] = None
+    email: str
+    name: str
+    age: int
+    medical_conditions: Optional[List[str]] = None
+    emergency_contact: Optional[str] = None
+    emergency_phone: Optional[str] = None
+    phone: Optional[str] = None
+    avatar_url: Optional[str] = None
+    assigned_doctor: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+class PatientUpdate(BaseModel):
+    name: Optional[str] = None
+    age: Optional[int] = None
+    medical_conditions: Optional[List[str]] = None
+    emergency_contact: Optional[str] = None
+    emergency_phone: Optional[str] = None
+    phone: Optional[str] = None
+    avatar_url: Optional[str] = None
 
 # ─── Sensor Data ───────────────────────────────────────────
 class AccelerometerData(BaseModel):

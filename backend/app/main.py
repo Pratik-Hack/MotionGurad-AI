@@ -184,52 +184,357 @@ async def websocket_telemetry_all(websocket: WebSocket):
         manager.disconnect(websocket, "telemetry_all")
 
 # ─── Auth Endpoints ────────────────────────────────────────
-@app.post("/api/auth/login", response_model=Token)
-async def login(credentials: UserLogin):
+@app.post("/api/auth/doctor/register")
+async def register_doctor(doctor: DoctorRegister):
+    """Register a new doctor account."""
     db = get_database()
-    if db is not None:
-        user = await db.users.find_one({"email": credentials.email})
-        if user and verify_password(credentials.password, user.get("password_hash", "")):
-            token = create_access_token({
-                "sub": user["email"],
-                "role": user["role"],
-                "name": user["name"]
-            })
-            return Token(access_token=token)
-    # Demo fallback
-    if credentials.email == "demo@motionguard.ai":
-        token = create_access_token({"sub": "demo@motionguard.ai", "role": "Doctor", "name": "Dr. Sarah Chen"})
-        return Token(access_token=token)
-    raise HTTPException(status_code=401, detail="Invalid credentials")
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    
+    # Check if email already exists
+    existing = await db.users.find_one({"email": doctor.email})
+    if existing:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    
+    # Create doctor record
+    doctor_doc = {
+        "email": doctor.email,
+        "name": doctor.name,
+        "role": "Doctor",
+        "specialty": doctor.specialty,
+        "license_number": doctor.license_number,
+        "institution": doctor.institution,
+        "phone": doctor.phone,
+        "password_hash": hash_password(doctor.password),
+        "avatar_url": None,
+        "created_at": datetime.now().isoformat()
+    }
+    
+    result = await db.users.insert_one(doctor_doc)
+    doctor_doc["_id"] = str(result.inserted_id)
+    
+    return {
+        "message": "Doctor registered successfully",
+        "user_id": str(result.inserted_id),
+        "email": doctor.email
+    }
 
-@app.post("/api/auth/register")
-async def register(user: UserCreate):
+@app.post("/api/auth/patient/register")
+async def register_patient(patient: PatientRegister):
+    """Register a new patient account."""
     db = get_database()
-    if db is not None:
-        existing = await db.users.find_one({"email": user.email})
-        if existing:
-            raise HTTPException(status_code=400, detail="Email already registered")
-        doc = {
-            "email": user.email,
-            "name": user.name,
-            "role": user.role,
-            "specialty": user.specialty,
-            "institution": user.institution,
-            "password_hash": hash_password(user.password)
-        }
-        await db.users.insert_one(doc)
-        return {"message": "User registered successfully"}
-    raise HTTPException(status_code=503, detail="Database unavailable")
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    
+    # Check if email already exists
+    existing = await db.users.find_one({"email": patient.email})
+    if existing:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    
+    # Create patient record
+    patient_doc = {
+        "email": patient.email,
+        "name": patient.name,
+        "role": "Patient",
+        "age": patient.age,
+        "medical_conditions": patient.medical_conditions or [],
+        "emergency_contact": patient.emergency_contact,
+        "emergency_phone": patient.emergency_phone,
+        "phone": patient.phone,
+        "password_hash": hash_password(patient.password),
+        "avatar_url": None,
+        "assigned_doctor": None,
+        "created_at": datetime.now().isoformat()
+    }
+    
+    result = await db.users.insert_one(patient_doc)
+    
+    return {
+        "message": "Patient registered successfully",
+        "user_id": str(result.inserted_id),
+        "email": patient.email
+    }
+
+@app.post("/api/auth/login")
+async def login(credentials: UserLogin):
+    """Login for both doctors and patients."""
+    db = get_database()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    
+    # Find user by email
+    user = await db.users.find_one({"email": credentials.email})
+    
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    
+    # Verify password
+    if not verify_password(credentials.password, user.get("password_hash", "")):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    
+    # Verify role matches
+    if user.get("role") != credentials.role:
+        raise HTTPException(status_code=401, detail=f"This account is registered as {user.get('role')}, not {credentials.role}")
+    
+    # Create token
+    token = create_access_token({
+        "sub": user["email"],
+        "user_id": str(user["_id"]),
+        "role": user["role"],
+        "name": user["name"]
+    })
+    
+    # Prepare user response
+    user_response = UserResponse(
+        id=str(user["_id"]),
+        email=user["email"],
+        name=user["name"],
+        role=user["role"],
+        avatar_url=user.get("avatar_url"),
+        created_at=user.get("created_at")
+    )
+    
+    return Token(access_token=token, user=user_response)
 
 @app.get("/api/auth/me")
-async def get_me(user=Depends(get_current_user)):
-    return {
-        "email": user.get("sub"),
-        "name": user.get("name", "Dr. Sarah Chen"),
-        "role": user.get("role", "Doctor"),
-        "specialty": "Chief of Neurology",
-        "institution": "St. Jude Medical Center"
-    }
+async def get_me(current_user: dict = Depends(get_current_user_optional)):
+    """Get current user profile."""
+    if current_user is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    db = get_database()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    
+    user = await db.users.find_one({"email": current_user.get("sub")})
+    
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    if user["role"] == "Doctor":
+        patients_count = await db.users.count_documents({"assigned_doctor": str(user["_id"]), "role": "Patient"})
+        return DoctorProfile(
+            id=str(user["_id"]),
+            email=user["email"],
+            name=user["name"],
+            specialty=user.get("specialty", ""),
+            license_number=user.get("license_number", ""),
+            institution=user.get("institution"),
+            phone=user.get("phone"),
+            avatar_url=user.get("avatar_url"),
+            created_at=user.get("created_at"),
+            patients_count=patients_count
+        )
+    else:
+        return PatientProfile(
+            id=str(user["_id"]),
+            email=user["email"],
+            name=user["name"],
+            age=user.get("age", 0),
+            medical_conditions=user.get("medical_conditions", []),
+            emergency_contact=user.get("emergency_contact"),
+            emergency_phone=user.get("emergency_phone"),
+            phone=user.get("phone"),
+            avatar_url=user.get("avatar_url"),
+            assigned_doctor=user.get("assigned_doctor"),
+            created_at=user.get("created_at")
+        )
+
+@app.get("/api/auth/doctor/{doctor_id}")
+async def get_doctor_profile(doctor_id: str):
+    """Get doctor profile by ID."""
+    db = get_database()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    
+    from bson import ObjectId
+    try:
+        user = await db.users.find_one({"_id": ObjectId(doctor_id), "role": "Doctor"})
+        if not user:
+            raise HTTPException(status_code=404, detail="Doctor not found")
+        
+        patients_count = await db.users.count_documents({"assigned_doctor": doctor_id, "role": "Patient"})
+        
+        return DoctorProfile(
+            id=str(user["_id"]),
+            email=user["email"],
+            name=user["name"],
+            specialty=user.get("specialty", ""),
+            license_number=user.get("license_number", ""),
+            institution=user.get("institution"),
+            phone=user.get("phone"),
+            avatar_url=user.get("avatar_url"),
+            created_at=user.get("created_at"),
+            patients_count=patients_count
+        )
+    except:
+        raise HTTPException(status_code=404, detail="Doctor not found")
+
+@app.get("/api/auth/patient/{patient_id}")
+async def get_patient_profile(patient_id: str):
+    """Get patient profile by ID."""
+    db = get_database()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    
+    from bson import ObjectId
+    try:
+        user = await db.users.find_one({"_id": ObjectId(patient_id), "role": "Patient"})
+        if not user:
+            raise HTTPException(status_code=404, detail="Patient not found")
+        
+        return PatientProfile(
+            id=str(user["_id"]),
+            email=user["email"],
+            name=user["name"],
+            age=user.get("age", 0),
+            medical_conditions=user.get("medical_conditions", []),
+            emergency_contact=user.get("emergency_contact"),
+            emergency_phone=user.get("emergency_phone"),
+            phone=user.get("phone"),
+            avatar_url=user.get("avatar_url"),
+            assigned_doctor=user.get("assigned_doctor"),
+            created_at=user.get("created_at")
+        )
+    except:
+        raise HTTPException(status_code=404, detail="Patient not found")
+
+@app.put("/api/auth/doctor/profile")
+async def update_doctor_profile(
+    update: DoctorUpdate,
+    current_user: dict = Depends(get_current_doctor)
+):
+    """Update doctor profile."""
+    db = get_database()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    
+    from bson import ObjectId
+    update_data = {k: v for k, v in update.dict().items() if v is not None}
+    
+    result = await db.users.update_one(
+        {"email": current_user.get("sub"), "role": "Doctor"},
+        {"$set": update_data}
+    )
+    
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Doctor not found")
+    
+    user = await db.users.find_one({"email": current_user.get("sub")})
+    patients_count = await db.users.count_documents({"assigned_doctor": str(user["_id"]), "role": "Patient"})
+    
+    return DoctorProfile(
+        id=str(user["_id"]),
+        email=user["email"],
+        name=user["name"],
+        specialty=user.get("specialty", ""),
+        license_number=user.get("license_number", ""),
+        institution=user.get("institution"),
+        phone=user.get("phone"),
+        avatar_url=user.get("avatar_url"),
+        created_at=user.get("created_at"),
+        patients_count=patients_count
+    )
+
+@app.put("/api/auth/patient/profile")
+async def update_patient_profile(
+    update: PatientUpdate,
+    current_user: dict = Depends(get_current_patient)
+):
+    """Update patient profile."""
+    db = get_database()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    
+    update_data = {k: v for k, v in update.dict().items() if v is not None}
+    
+    result = await db.users.update_one(
+        {"email": current_user.get("sub"), "role": "Patient"},
+        {"$set": update_data}
+    )
+    
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Patient not found")
+    
+    user = await db.users.find_one({"email": current_user.get("sub")})
+    
+    return PatientProfile(
+        id=str(user["_id"]),
+        email=user["email"],
+        name=user["name"],
+        age=user.get("age", 0),
+        medical_conditions=user.get("medical_conditions", []),
+        emergency_contact=user.get("emergency_contact"),
+        emergency_phone=user.get("emergency_phone"),
+        phone=user.get("phone"),
+        avatar_url=user.get("avatar_url"),
+        assigned_doctor=user.get("assigned_doctor"),
+        created_at=user.get("created_at")
+    )
+
+@app.post("/api/doctor/{doctor_id}/assign-patient/{patient_id}")
+async def assign_patient_to_doctor(
+    doctor_id: str,
+    patient_id: str,
+    current_user: dict = Depends(get_current_doctor)
+):
+    """Assign a patient to a doctor."""
+    db = get_database()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    
+    from bson import ObjectId
+    
+    # Verify the doctor is updating their own assignments
+    if current_user.get("user_id") != doctor_id:
+        raise HTTPException(status_code=403, detail="Cannot assign patients to other doctors")
+    
+    # Update patient's assigned doctor
+    result = await db.users.update_one(
+        {"_id": ObjectId(patient_id), "role": "Patient"},
+        {"$set": {"assigned_doctor": doctor_id}}
+    )
+    
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Patient not found")
+    
+    return {"message": "Patient assigned successfully"}
+
+@app.get("/api/doctor/{doctor_id}/patients")
+async def get_doctor_patients(
+    doctor_id: str,
+    current_user: dict = Depends(get_current_doctor)
+):
+    """Get all patients assigned to a doctor."""
+    db = get_database()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    
+    # Verify the doctor is viewing their own patients
+    if current_user.get("user_id") != doctor_id:
+        raise HTTPException(status_code=403, detail="Cannot view other doctors' patients")
+    
+    patients = await db.users.find(
+        {"assigned_doctor": doctor_id, "role": "Patient"},
+        {"password_hash": 0}
+    ).to_list(None)
+    
+    return [
+        PatientProfile(
+            id=str(p["_id"]),
+            email=p["email"],
+            name=p["name"],
+            age=p.get("age", 0),
+            medical_conditions=p.get("medical_conditions", []),
+            emergency_contact=p.get("emergency_contact"),
+            emergency_phone=p.get("emergency_phone"),
+            phone=p.get("phone"),
+            avatar_url=p.get("avatar_url"),
+            assigned_doctor=p.get("assigned_doctor"),
+            created_at=p.get("created_at")
+        )
+        for p in patients
+    ]
 
 # ─── Patient Endpoints ─────────────────────────────────────
 @app.get("/api/patients")
