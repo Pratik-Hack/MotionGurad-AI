@@ -1,9 +1,105 @@
 'use client';
-import React from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import DashboardLayout from '@/components/DashboardLayout';
+import { useAuth } from '@/hooks/useAuth';
+
+type DoctorStats = {
+  totalPatients: number;
+  criticalAlerts: number;
+  avgStability: number;
+  pendingReviews: number;
+  overview: string[];
+};
 
 export default function DoctorDashboard() {
+  const { fetchWithAuth, getUser } = useAuth();
+  const [loading, setLoading] = useState(true);
+  const [stats, setStats] = useState<DoctorStats>({
+    totalPatients: 0,
+    criticalAlerts: 0,
+    avgStability: 0,
+    pendingReviews: 0,
+    overview: [],
+  });
+
+  const loadDashboardData = useCallback(async () => {
+    try {
+      const localUser = getUser();
+
+      let patients: any[] = [];
+      if (localUser?.id) {
+        const patientsRes = await fetchWithAuth(`/api/doctor/${localUser.id}/patients`);
+        if (patientsRes.ok) {
+          patients = await patientsRes.json();
+        }
+      }
+
+      if (patients.length === 0) {
+        const allPatientsRes = await fetchWithAuth('/api/patients');
+        if (allPatientsRes.ok) {
+          patients = await allPatientsRes.json();
+        }
+      }
+
+      const alertsRes = await fetchWithAuth('/api/alerts');
+      const alerts = alertsRes.ok ? await alertsRes.json() : [];
+
+      const patientIds = patients
+        .map((p) => p.patient_id)
+        .filter(Boolean)
+        .slice(0, 8);
+
+      let avgStability = 0;
+      if (patientIds.length > 0) {
+        const summaries = await Promise.all(
+          patientIds.map(async (pid: string) => {
+            try {
+              const response = await fetchWithAuth(`/api/patients/${pid}/summary`);
+              if (!response.ok) return null;
+              return response.json();
+            } catch {
+              return null;
+            }
+          })
+        );
+
+        const validSummaries = (await Promise.all(summaries)).filter(Boolean) as any[];
+        if (validSummaries.length > 0) {
+          const total = validSummaries.reduce((sum, item) => sum + (item.stability_score || 0), 0);
+          avgStability = Math.round(total / validSummaries.length);
+        }
+      }
+
+      const criticalAlerts = alerts.filter((a: any) => String(a.severity).toUpperCase() === 'CRITICAL').length;
+      const pendingReviews = alerts.filter((a: any) => String(a.status).toLowerCase() !== 'resolved').length;
+
+      const overview = [
+        `${criticalAlerts} critical alerts in queue`,
+        `${pendingReviews} alerts need review`,
+        `${patients.length} patients under monitoring`,
+      ];
+
+      setStats({
+        totalPatients: patients.length,
+        criticalAlerts,
+        avgStability,
+        pendingReviews,
+        overview,
+      });
+    } catch {
+      setStats((prev) => ({ ...prev }));
+    } finally {
+      setLoading(false);
+    }
+  }, [fetchWithAuth, getUser]);
+
+  useEffect(() => {
+    loadDashboardData();
+    const interval = setInterval(loadDashboardData, 8000);
+    return () => clearInterval(interval);
+  }, [loadDashboardData]);
+
   return (
     <DashboardLayout
       headerProps={{
@@ -18,25 +114,25 @@ export default function DoctorDashboard() {
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
         <div className="glass-card p-5">
           <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Total Patients</p>
-          <p className="text-3xl font-bold text-gray-900">12</p>
-          <p className="text-xs text-green-600 mt-1">+2 this week</p>
+          <p className="text-3xl font-bold text-gray-900">{loading ? '...' : stats.totalPatients}</p>
+          <p className="text-xs text-green-600 mt-1">Live from database</p>
         </div>
 
         <div className="glass-card p-5">
           <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Critical Alerts</p>
-          <p className="text-3xl font-bold text-gray-900">3</p>
+          <p className="text-3xl font-bold text-gray-900">{loading ? '...' : stats.criticalAlerts}</p>
           <p className="text-xs text-red-600 mt-1">Needs attention</p>
         </div>
 
         <div className="glass-card p-5">
           <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Avg Stability</p>
-          <p className="text-3xl font-bold text-gray-900">88%</p>
-          <p className="text-xs text-green-600 mt-1">Improving trend</p>
+          <p className="text-3xl font-bold text-gray-900">{loading ? '...' : `${stats.avgStability}%`}</p>
+          <p className="text-xs text-green-600 mt-1">Realtime patient summaries</p>
         </div>
 
         <div className="glass-card p-5">
           <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Pending Reviews</p>
-          <p className="text-3xl font-bold text-gray-900">5</p>
+          <p className="text-3xl font-bold text-gray-900">{loading ? '...' : stats.pendingReviews}</p>
           <p className="text-xs text-yellow-600 mt-1">Follow-up required</p>
         </div>
       </div>
@@ -55,9 +151,9 @@ export default function DoctorDashboard() {
         <div className="glass-card p-6">
           <h3 className="text-base font-bold text-gray-900 mb-4">Today Overview</h3>
           <div className="space-y-3 text-sm text-gray-600">
-            <p>• 2 fall-risk warnings generated</p>
-            <p>• 4 medication adherence reminders sent</p>
-            <p>• 1 patient needs immediate callback</p>
+            {stats.overview.map((line) => (
+              <p key={line}>• {line}</p>
+            ))}
           </div>
         </div>
       </div>

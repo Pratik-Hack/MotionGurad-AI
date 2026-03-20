@@ -12,13 +12,7 @@ export default function AlertsPage() {
   const [emsDispatch, setEmsDispatch] = useState(false);
 
   useEffect(() => {
-    apiFetch('/api/alerts').then(setAlerts).catch(() => {
-      setAlerts([
-        { severity: 'CRITICAL', alert_type: 'Possible Fall Detected', patient_name: 'John Miller', room: 'Room 402', timestamp: '10:24 AM', status: 'Resolved', action_taken: 'Nurse Dispatched' },
-        { severity: 'WARNING', alert_type: 'Irregular Heart Rhythm', patient_name: 'Elena Rossi', room: 'Room 105', timestamp: '09:45 AM', status: 'Pending', action_taken: null },
-        { severity: 'WARNING', alert_type: 'Stability Drop > 80%', patient_name: 'Arthur Miller', room: 'Room 402', timestamp: '08:12 AM', status: 'Acknowledged', action_taken: 'User Acknowledged' },
-      ]);
-    });
+    apiFetch('/api/alerts').then(setAlerts).catch(() => setAlerts([]));
   }, []);
 
   const handleManualEmergency = async () => {

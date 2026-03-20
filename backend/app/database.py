@@ -16,7 +16,9 @@ async def connect_to_database():
     await db.patients.create_index("patient_id", unique=True)
     await db.alerts.create_index([("timestamp", -1)])
     await db.telemetry.create_index([("patient_id", 1), ("timestamp", -1)])
+    await db.telemetry.create_index([("patient_id", 1), ("recorded_at", -1)])
     await db.medications.create_index("patient_id")
+    await db.medication_adherence.create_index([("patient_id", 1), ("date", -1)])
     await db.users.create_index("email", unique=True)
     print(f"Connected to MongoDB: {settings.DATABASE_NAME}")
 

@@ -5,7 +5,7 @@ Real-time motion instability prediction system.
 import asyncio
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, Query
@@ -70,6 +70,221 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
+
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+async def _persist_telemetry_frame(frame: dict):
+    db = get_database()
+    if db is None:
+        return
+    try:
+        ts = _safe_float(frame.get("timestamp"), time.time())
+        doc = {**frame, "recorded_at": datetime.fromtimestamp(ts)}
+        await db.telemetry.insert_one(doc)
+    except Exception:
+        pass
+
+
+async def _get_or_seed_adherence(db, patient_id: str, days: int = 30):
+    end_date = datetime.utcnow().date()
+    start_date = end_date - timedelta(days=max(0, days - 1))
+
+    records = await db.medication_adherence.find(
+        {
+            "patient_id": patient_id,
+            "date": {"$gte": start_date.isoformat(), "$lte": end_date.isoformat()},
+        },
+        {"_id": 0},
+    ).sort("date", 1).to_list(5000)
+
+    if records:
+        return records
+
+    medications = await db.medications.find({"patient_id": patient_id}, {"_id": 0}).to_list(100)
+    if not medications:
+        return []
+
+    seeded: List[dict] = []
+    for day_offset in range(days):
+        day = (start_date + timedelta(days=day_offset)).isoformat()
+        for med in medications:
+            schedule = med.get("schedule") or ["08:00"]
+            for dose_idx, _ in enumerate(schedule):
+                seed_val = abs(hash(f"{patient_id}-{day}-{med.get('drug_name','med')}-{dose_idx}")) % 100
+                if seed_val < 8:
+                    status = "Missed"
+                elif seed_val < 20:
+                    status = "Delayed"
+                else:
+                    status = "Taken"
+
+                seeded.append(
+                    {
+                        "patient_id": patient_id,
+                        "date": day,
+                        "status": status,
+                        "medication_id": f"{med.get('drug_name', 'med')}-{dose_idx}",
+                        "taken_at": datetime.utcnow().isoformat() if status == "Taken" else None,
+                    }
+                )
+
+    if seeded:
+        await db.medication_adherence.insert_many(seeded)
+    return seeded
+
+
+async def _seed_baseline_telemetry(db, patient_ids: List[str], target_samples: int = 180):
+    for patient_id in patient_ids:
+        existing = await db.telemetry.count_documents({"patient_id": patient_id})
+        earliest = await db.telemetry.find(
+            {"patient_id": patient_id},
+            {"recorded_at": 1, "_id": 0}
+        ).sort("recorded_at", 1).limit(1).to_list(1)
+
+        needs_backfill = False
+        if earliest and isinstance(earliest[0].get("recorded_at"), datetime):
+            span_days = (datetime.utcnow() - earliest[0]["recorded_at"]).days
+            needs_backfill = span_days < 7
+
+        if existing >= target_samples and not needs_backfill:
+            continue
+
+        to_generate = target_samples if needs_backfill else (target_samples - existing)
+        sim = get_simulator(patient_id)
+        historical_window_seconds = 14 * 24 * 60 * 60
+        step_seconds = historical_window_seconds / max(1, to_generate)
+        start_ts = time.time() - historical_window_seconds
+        docs: List[dict] = []
+
+        for idx in range(to_generate):
+            sample = sim.generate_sample()
+            pipeline.add_sample(
+                patient_id=patient_id,
+                accel_x=sample["accelerometer"]["x"],
+                accel_y=sample["accelerometer"]["y"],
+                accel_z=sample["accelerometer"]["z"],
+                gyro_x=sample["gyroscope"]["x"],
+                gyro_y=sample["gyroscope"]["y"],
+                gyro_z=sample["gyroscope"]["z"],
+                heart_rate=sample["heart_rate"]["bpm"],
+            )
+            analysis = pipeline.analyze(patient_id)
+
+            ts = start_ts + (idx * step_seconds)
+            docs.append(
+                {
+                    "type": "telemetry",
+                    "patient_id": patient_id,
+                    "timestamp": ts,
+                    "accel_x": sample["accelerometer"]["x"],
+                    "accel_y": sample["accelerometer"]["y"],
+                    "accel_z": sample["accelerometer"]["z"],
+                    "gyro_x": sample["gyroscope"]["x"],
+                    "gyro_y": sample["gyroscope"]["y"],
+                    "gyro_z": sample["gyroscope"]["z"],
+                    "heart_rate": sample["heart_rate"]["bpm"],
+                    "spo2": sample["heart_rate"]["spo2"],
+                    "stability_score": analysis["stability"]["score"],
+                    "risk_level": analysis["stability"]["risk_level"],
+                    "tremor_severity": analysis["tremor"]["severity"],
+                    "dominant_frequency": analysis["tremor"]["dominant_frequency"],
+                    "fall_probability": analysis["fall_risk"]["probability"],
+                    "motion_intensity": analysis["motion_intensity"],
+                    "fft_spectrum": analysis["tremor"]["fft_spectrum"],
+                    "fft_frequencies": analysis["tremor"]["fft_frequencies"],
+                    "motion_smoothness": analysis["stability"]["motion_smoothness"],
+                    "gait_consistency": analysis["stability"]["gait_consistency"],
+                    "heart_rhythm_stability": analysis["stability"]["heart_rhythm_stability"],
+                    "recorded_at": datetime.fromtimestamp(ts),
+                }
+            )
+
+        if docs:
+            await db.telemetry.insert_many(docs)
+
+
+async def _ensure_required_runtime_data(db):
+    patient_count = await db.patients.count_documents({})
+    if patient_count == 0:
+        await db.patients.insert_many(DEMO_PATIENTS)
+
+    med_count = await db.medications.count_documents({})
+    if med_count == 0:
+        await db.medications.insert_many(DEMO_MEDICATIONS)
+
+    alerts_count = await db.alerts.count_documents({})
+    if alerts_count == 0:
+        await db.alerts.insert_many(generate_demo_alerts())
+
+    # Existing demo users from seed data (doctor/admin/viewer)
+    existing_emails = {
+        user.get("email")
+        for user in await db.users.find({}, {"email": 1, "_id": 0}).to_list(1000)
+        if user.get("email")
+    }
+    for user in DEMO_USERS:
+        if user["email"] not in existing_emails:
+            user_doc = {**user, "password_hash": hash_password("demo123")}
+            await db.users.insert_one(user_doc)
+
+    demo_doctor = await db.users.find_one({"email": "demo.doctor@motionguard.ai"})
+    if not demo_doctor:
+        doctor_doc = {
+            "email": "demo.doctor@motionguard.ai",
+            "name": "Dr. Demo Kumar",
+            "role": "Doctor",
+            "specialty": "Neurology",
+            "license_number": "DEMO-DOC-001",
+            "institution": "MotionGuard Demo Hospital",
+            "phone": "+91-9000000001",
+            "password_hash": hash_password("demo12345"),
+            "avatar_url": None,
+            "created_at": datetime.utcnow().isoformat(),
+        }
+        inserted = await db.users.insert_one(doctor_doc)
+        doctor_id = str(inserted.inserted_id)
+    else:
+        doctor_id = str(demo_doctor["_id"])
+
+    demo_patient = await db.users.find_one({"email": "demo.patient@motionguard.ai"})
+    if not demo_patient:
+        patient_doc = {
+            "email": "demo.patient@motionguard.ai",
+            "name": "Demo Patient Sharma",
+            "role": "Patient",
+            "age": 67,
+            "medical_conditions": ["Parkinson's", "Hypertension"],
+            "emergency_contact": "Rahul Sharma",
+            "emergency_phone": "+91-9000000002",
+            "phone": "+91-9000000003",
+            "password_hash": hash_password("demo12345"),
+            "avatar_url": None,
+            "assigned_doctor": doctor_id,
+            "created_at": datetime.utcnow().isoformat(),
+        }
+        await db.users.insert_one(patient_doc)
+    elif not demo_patient.get("assigned_doctor"):
+        await db.users.update_one(
+            {"_id": demo_patient["_id"]},
+            {"$set": {"assigned_doctor": doctor_id}}
+        )
+
+    patient_ids = [
+        p["patient_id"]
+        for p in await db.patients.find({}, {"patient_id": 1, "_id": 0}).to_list(1000)
+        if p.get("patient_id")
+    ]
+
+    for pid in patient_ids:
+        await _get_or_seed_adherence(db, pid, 30)
+
+    await _seed_baseline_telemetry(db, patient_ids, 180)
+
 # ─── Lifecycle ─────────────────────────────────────────────
 @app.on_event("startup")
 async def startup():
@@ -77,16 +292,8 @@ async def startup():
         await connect_to_database()
         db = get_database()
         if db is not None:
-            # Seed demo data if empty
-            patient_count = await db.patients.count_documents({})
-            if patient_count == 0:
-                await db.patients.insert_many(DEMO_PATIENTS)
-                await db.medications.insert_many(DEMO_MEDICATIONS)
-                await db.alerts.insert_many(generate_demo_alerts())
-                for user in DEMO_USERS:
-                    user_doc = {**user, "password_hash": hash_password("demo123")}
-                    await db.users.insert_one(user_doc)
-                print("Demo data seeded successfully")
+            await _ensure_required_runtime_data(db)
+            print("Runtime data bootstrap complete")
     except Exception as e:
         print(f"Warning: Could not connect to MongoDB: {e}")
         print("Running in demo mode without database persistence")
@@ -146,6 +353,8 @@ async def telemetry_broadcast_loop():
                 "gait_consistency": analysis["stability"]["gait_consistency"],
                 "heart_rhythm_stability": analysis["stability"]["heart_rhythm_stability"],
             }
+
+            asyncio.create_task(_persist_telemetry_frame(telemetry_frame))
 
             await manager.broadcast(telemetry_frame, f"telemetry_{pid}")
             await manager.broadcast(telemetry_frame, "telemetry_all")
@@ -561,11 +770,15 @@ async def get_patient(patient_id: str):
 @app.get("/api/patients/{patient_id}/summary")
 async def get_patient_summary(patient_id: str):
     analysis = pipeline.analyze(patient_id)
+    db = get_database()
     patient = None
-    for p in DEMO_PATIENTS:
-        if p["patient_id"] == patient_id:
-            patient = p
-            break
+    if db is not None:
+        patient = await db.patients.find_one({"patient_id": patient_id}, {"_id": 0})
+    if patient is None:
+        for p in DEMO_PATIENTS:
+            if p["patient_id"] == patient_id:
+                patient = p
+                break
     return {
         "patient_id": patient_id,
         "name": patient["name"] if patient else "Unknown",
@@ -655,20 +868,60 @@ async def get_medications(patient_id: Optional[str] = None):
 
 @app.get("/api/medications/{patient_id}/stats")
 async def get_medication_stats(patient_id: str):
-    adherence = generate_adherence_history(patient_id, 30)
-    taken = sum(1 for a in adherence if a["status"] == "Taken")
+    db = get_database()
+    if db is None:
+        adherence = generate_adherence_history(patient_id, 30)
+        taken = sum(1 for a in adherence if a["status"] == "Taken")
+        total = len(adherence)
+        return {
+            "adherence_rate": round(taken / total * 100, 1) if total > 0 else 0,
+            "avg_stability_gain": 0.0,
+            "doses_taken": taken,
+            "doses_total": total,
+            "current_status": "Unknown"
+        }
+
+    adherence = await _get_or_seed_adherence(db, patient_id, 30)
+    taken = sum(1 for a in adherence if a.get("status") == "Taken")
     total = len(adherence)
+    adherence_rate = round(taken / total * 100, 1) if total > 0 else 0
+
+    telemetry_points = await db.telemetry.find(
+        {"patient_id": patient_id},
+        {"stability_score": 1, "recorded_at": 1, "_id": 0}
+    ).sort("recorded_at", 1).limit(2000).to_list(2000)
+
+    avg_stability_gain = 0.0
+    if len(telemetry_points) >= 20:
+        mid = len(telemetry_points) // 2
+        first_half = telemetry_points[:mid]
+        second_half = telemetry_points[mid:]
+        first_avg = sum(_safe_float(x.get("stability_score"), 0.0) for x in first_half) / max(1, len(first_half))
+        second_avg = sum(_safe_float(x.get("stability_score"), 0.0) for x in second_half) / max(1, len(second_half))
+        avg_stability_gain = round(second_avg - first_avg, 2)
+
+    if adherence_rate >= 90:
+        current_status = "Optimal Stability"
+    elif adherence_rate >= 75:
+        current_status = "Stable"
+    else:
+        current_status = "Needs Attention"
+
     return {
-        "adherence_rate": round(taken / total * 100, 1) if total > 0 else 0,
-        "avg_stability_gain": 12.0,
+        "adherence_rate": adherence_rate,
+        "avg_stability_gain": avg_stability_gain,
         "doses_taken": taken,
         "doses_total": total,
-        "current_status": "Optimal Stability"
+        "current_status": current_status
     }
 
 @app.get("/api/medications/{patient_id}/adherence")
 async def get_adherence(patient_id: str, days: int = 30):
-    return generate_adherence_history(patient_id, days)
+    db = get_database()
+    if db is None:
+        return generate_adherence_history(patient_id, days)
+    records = await _get_or_seed_adherence(db, patient_id, days)
+    return sorted(records, key=lambda x: x.get("date", ""))
 
 @app.post("/api/medications")
 async def add_medication(med: Medication):
@@ -680,43 +933,167 @@ async def add_medication(med: Medication):
 # ─── Analytics Endpoints ───────────────────────────────────
 @app.get("/api/analytics/{patient_id}/stability-trend")
 async def get_stability_trend(patient_id: str, period: str = "weeks"):
-    """Generate stability trend data."""
-    import random
-    random.seed(42)
-    data = []
-    base = 75
-    for i in range(30 if period == "weeks" else 120):
-        base += random.uniform(-3, 3.5)
-        base = max(40, min(98, base))
-        data.append({
-            "day": i,
-            "score": round(base, 1),
-            "label": f"Day {i}"
-        })
-    return data
+    db = get_database()
+    horizon = 30 if period == "weeks" else 120
+    start_at = datetime.utcnow() - timedelta(days=horizon)
+
+    if db is None:
+        return []
+
+    records = await db.telemetry.find(
+        {"patient_id": patient_id, "recorded_at": {"$gte": start_at}},
+        {"recorded_at": 1, "stability_score": 1, "_id": 0}
+    ).sort("recorded_at", 1).to_list(10000)
+
+    by_day: Dict[str, List[float]] = {}
+    for record in records:
+        ts = record.get("recorded_at")
+        if not isinstance(ts, datetime):
+            continue
+        day_key = ts.date().isoformat()
+        by_day.setdefault(day_key, []).append(_safe_float(record.get("stability_score"), 0.0))
+
+    day_keys = sorted(by_day.keys())
+    trend = []
+    for idx, day_key in enumerate(day_keys):
+        vals = by_day[day_key]
+        avg_score = round(sum(vals) / max(1, len(vals)), 1)
+        trend.append({"day": idx, "score": avg_score, "label": day_key})
+    return trend
 
 @app.get("/api/analytics/{patient_id}/activity-breakdown")
 async def get_activity_breakdown(patient_id: str):
+    db = get_database()
+    if db is None:
+        return {"total_hours": 0, "breakdown": []}
+
+    start_at = datetime.utcnow() - timedelta(hours=24)
+    records = await db.telemetry.find(
+        {"patient_id": patient_id, "recorded_at": {"$gte": start_at}},
+        {"motion_intensity": 1, "tremor_severity": 1, "_id": 0}
+    ).to_list(20000)
+
+    if not records:
+        return {
+            "total_hours": 0,
+            "breakdown": [
+                {"activity": "Walking", "percentage": 0, "color": "#137fec"},
+                {"activity": "Standing", "percentage": 0, "color": "#f59e0b"},
+                {"activity": "Sitting", "percentage": 0, "color": "#9ca3af"},
+                {"activity": "Tremors", "percentage": 0, "color": "#ef4444"}
+            ]
+        }
+
+    buckets = {"Walking": 0, "Standing": 0, "Sitting": 0, "Tremors": 0}
+    for record in records:
+        intensity = _safe_float(record.get("motion_intensity"), 0.0)
+        tremor = str(record.get("tremor_severity", "")).lower()
+        if tremor in {"moderate", "severe"}:
+            buckets["Tremors"] += 1
+        if intensity >= 2.0:
+            buckets["Walking"] += 1
+        elif intensity >= 0.8:
+            buckets["Standing"] += 1
+        else:
+            buckets["Sitting"] += 1
+
+    total = sum(buckets.values()) or 1
+    breakdown = [
+        {"activity": "Walking", "percentage": round(buckets["Walking"] * 100 / total), "color": "#137fec"},
+        {"activity": "Standing", "percentage": round(buckets["Standing"] * 100 / total), "color": "#f59e0b"},
+        {"activity": "Sitting", "percentage": round(buckets["Sitting"] * 100 / total), "color": "#9ca3af"},
+        {"activity": "Tremors", "percentage": round(buckets["Tremors"] * 100 / total), "color": "#ef4444"}
+    ]
+
     return {
-        "total_hours": 7.2,
-        "breakdown": [
-            {"activity": "Walking", "percentage": 60, "color": "#137fec"},
-            {"activity": "Standing", "percentage": 15, "color": "#f59e0b"},
-            {"activity": "Sitting", "percentage": 15, "color": "#9ca3af"},
-            {"activity": "Tremors", "percentage": 10, "color": "#ef4444"}
-        ]
+        "total_hours": round(len(records) / 36000, 2),
+        "breakdown": breakdown
     }
 
 @app.get("/api/analytics/{patient_id}/stats")
 async def get_analytics_stats(patient_id: str):
+    db = get_database()
+    if db is None:
+        return {
+            "stability_index": {"value": 0, "change": 0},
+            "avg_daily_walk": {"value": 0, "unit": "m", "change": 0},
+            "tremor_events": {"value": 0, "change": 0},
+            "fall_risk": {"value": "Unknown", "label": "No telemetry available"},
+            "gait_symmetry": 0,
+            "postural_sway": 0,
+            "resting_tremor": "Unknown"
+        }
+
+    now = datetime.utcnow()
+    current_start = now - timedelta(hours=24)
+    previous_start = now - timedelta(hours=48)
+
+    current = await db.telemetry.find(
+        {"patient_id": patient_id, "recorded_at": {"$gte": current_start}},
+        {"stability_score": 1, "fall_probability": 1, "gait_consistency": 1, "dominant_frequency": 1,
+         "accel_x": 1, "accel_y": 1, "accel_z": 1, "tremor_severity": 1, "motion_intensity": 1, "_id": 0}
+    ).to_list(30000)
+
+    previous = await db.telemetry.find(
+        {"patient_id": patient_id, "recorded_at": {"$gte": previous_start, "$lt": current_start}},
+        {"stability_score": 1, "motion_intensity": 1, "tremor_severity": 1, "_id": 0}
+    ).to_list(30000)
+
+    def avg(values: List[float]) -> float:
+        return sum(values) / max(1, len(values))
+
+    cur_stability = avg([_safe_float(x.get("stability_score"), 0.0) for x in current]) if current else 0.0
+    prev_stability = avg([_safe_float(x.get("stability_score"), 0.0) for x in previous]) if previous else 0.0
+    stability_change = round(cur_stability - prev_stability, 2)
+
+    cur_walk = sum(1 for x in current if _safe_float(x.get("motion_intensity"), 0.0) >= 2.0)
+    prev_walk = sum(1 for x in previous if _safe_float(x.get("motion_intensity"), 0.0) >= 2.0)
+    # Approximate distance per high-motion sample for now
+    cur_walk_m = round(cur_walk * 0.04, 1)
+    prev_walk_m = round(prev_walk * 0.04, 1)
+
+    cur_tremor_events = sum(1 for x in current if str(x.get("tremor_severity", "")).lower() in {"moderate", "severe"})
+    prev_tremor_events = sum(1 for x in previous if str(x.get("tremor_severity", "")).lower() in {"moderate", "severe"})
+
+    fall_probability = avg([_safe_float(x.get("fall_probability"), 0.0) for x in current]) if current else 0.0
+    if fall_probability >= 65:
+        fall_risk_value = "High"
+    elif fall_probability >= 35:
+        fall_risk_value = "Medium"
+    else:
+        fall_risk_value = "Low"
+
+    gait_symmetry = round(avg([_safe_float(x.get("gait_consistency"), 0.0) for x in current]), 2) if current else 0.0
+
+    magnitudes = [
+        (_safe_float(x.get("accel_x"), 0.0) ** 2 + _safe_float(x.get("accel_y"), 0.0) ** 2 + _safe_float(x.get("accel_z"), 0.0) ** 2) ** 0.5
+        for x in current
+    ]
+    if len(magnitudes) > 1:
+        m_avg = avg(magnitudes)
+        variance = avg([(m - m_avg) ** 2 for m in magnitudes])
+        postural_sway = round(variance ** 0.5, 4)
+    else:
+        postural_sway = 0.0
+
+    dom_freq = avg([_safe_float(x.get("dominant_frequency"), 0.0) for x in current if x.get("dominant_frequency") is not None]) if current else 0.0
+    if dom_freq >= 8:
+        resting_tremor = "Severe"
+    elif dom_freq >= 5:
+        resting_tremor = "Moderate"
+    elif dom_freq > 0:
+        resting_tremor = "Mild"
+    else:
+        resting_tremor = "Unknown"
+
     return {
-        "stability_index": {"value": 88, "change": 4.2},
-        "avg_daily_walk": {"value": 142, "unit": "m", "change": -10.5},
-        "tremor_events": {"value": 12, "change": 2.1},
-        "fall_risk": {"value": "Low", "label": "Based on gait symmetry"},
-        "gait_symmetry": 94.2,
-        "postural_sway": 0.12,
-        "resting_tremor": "Moderate"
+        "stability_index": {"value": round(cur_stability, 1), "change": stability_change},
+        "avg_daily_walk": {"value": cur_walk_m, "unit": "m", "change": round(cur_walk_m - prev_walk_m, 1)},
+        "tremor_events": {"value": cur_tremor_events, "change": cur_tremor_events - prev_tremor_events},
+        "fall_risk": {"value": fall_risk_value, "label": "Computed from recent fall probability"},
+        "gait_symmetry": gait_symmetry,
+        "postural_sway": postural_sway,
+        "resting_tremor": resting_tremor
     }
 
 # ─── Sensor Config Endpoints ──────────────────────────────
