@@ -26,6 +26,27 @@ export interface PatientProfile extends User {
   assigned_doctor?: string;
 }
 
+export interface DoctorDirectoryItem {
+  id: string;
+  name: string;
+  specialty: string;
+  institution?: string;
+}
+
+export interface ConnectionRequest {
+  id: string;
+  patient_id: string;
+  patient_name: string;
+  patient_email: string;
+  doctor_id: string;
+  doctor_name: string;
+  doctor_specialty?: string;
+  note?: string;
+  status: 'Pending' | 'Approved' | 'Rejected';
+  created_at: string;
+  updated_at: string;
+}
+
 export const useAuth = () => {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(false);

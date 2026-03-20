@@ -1,7 +1,7 @@
 'use client';
 import React, { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { useAuth, DoctorProfile } from '@/hooks/useAuth';
+import { useAuth, DoctorProfile, ConnectionRequest, PatientProfile } from '@/hooks/useAuth';
 import Link from 'next/link';
 
 export default function DoctorProfilePage() {
@@ -9,9 +9,14 @@ export default function DoctorProfilePage() {
   const { user, getToken, fetchWithAuth, logout } = useAuth();
   const [profile, setProfile] = useState<DoctorProfile | null>(null);
   const [patients, setPatients] = useState<any[]>([]);
+  const [pendingRequests, setPendingRequests] = useState<ConnectionRequest[]>([]);
+  const [selectedPatient, setSelectedPatient] = useState<PatientProfile | null>(null);
+  const [detailsLoading, setDetailsLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
+  const [selectedPatientCardId, setSelectedPatientCardId] = useState<string | null>(null);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
 
@@ -32,6 +37,7 @@ export default function DoctorProfilePage() {
 
     fetchDoctorProfile();
     fetchPatients();
+    fetchPendingRequests();
   }, []);
 
   const fetchDoctorProfile = async () => {
@@ -71,6 +77,18 @@ export default function DoctorProfilePage() {
     }
   };
 
+  const fetchPendingRequests = async () => {
+    try {
+      const response = await fetchWithAuth('/api/connections/doctor/requests?status=Pending');
+      if (response.ok) {
+        const data = await response.json();
+        setPendingRequests(data);
+      }
+    } catch (err) {
+      console.error('Failed to fetch pending requests:', err);
+    }
+  };
+
   const handleSaveProfile = async () => {
     setSaving(true);
     setError('');
@@ -96,6 +114,61 @@ export default function DoctorProfilePage() {
       console.error(err);
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleRequestAction = async (requestId: string, action: 'approve' | 'reject') => {
+    setActionLoadingId(requestId);
+    setError('');
+    setSuccess('');
+
+    try {
+      const response = await fetchWithAuth(`/api/connections/doctor/requests/${requestId}/${action}`, {
+        method: 'POST',
+      });
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.detail || `Failed to ${action} request`);
+      }
+
+      setSuccess(`Request ${action === 'approve' ? 'approved' : 'rejected'} successfully.`);
+      await Promise.all([fetchPendingRequests(), fetchPatients(), fetchDoctorProfile()]);
+      setTimeout(() => setSuccess(''), 3000);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : `Failed to ${action} request`;
+      setError(message);
+    } finally {
+      setActionLoadingId(null);
+    }
+  };
+
+  const handleViewPatientDetails = async (patientId: string) => {
+    try {
+      const current = JSON.parse(localStorage.getItem('user') || '{}');
+      if (!current.id) {
+        setError('Unable to identify doctor account. Please login again.');
+        return;
+      }
+
+      setDetailsLoading(true);
+      setSelectedPatientCardId(patientId);
+      setError('');
+
+      const response = await fetchWithAuth(`/api/doctor/${current.id}/patients/${patientId}`);
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.detail || 'Failed to load patient details');
+      }
+
+      const data = await response.json();
+      setSelectedPatient(data);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to load patient details';
+      setError(message);
+    } finally {
+      setDetailsLoading(false);
+      setSelectedPatientCardId(null);
     }
   };
 
@@ -321,6 +394,43 @@ export default function DoctorProfilePage() {
                 </div>
               </div>
             </div>
+
+            <div className="bg-white rounded-lg shadow p-6 mt-6">
+              <h3 className="text-lg font-semibold text-gray-900 mb-4">
+                Pending Requests ({pendingRequests.length})
+              </h3>
+              {pendingRequests.length === 0 ? (
+                <p className="text-sm text-gray-500">No pending patient requests.</p>
+              ) : (
+                <div className="space-y-3 max-h-72 overflow-y-auto pr-1">
+                  {pendingRequests.map((request) => (
+                    <div key={request.id} className="p-3 border border-gray-200 rounded-lg">
+                      <p className="font-semibold text-gray-900 text-sm">{request.patient_name}</p>
+                      <p className="text-xs text-gray-600">{request.patient_email}</p>
+                      {request.note ? (
+                        <p className="mt-2 text-xs text-gray-700 bg-gray-50 rounded p-2">{request.note}</p>
+                      ) : null}
+                      <div className="mt-3 flex gap-2">
+                        <button
+                          onClick={() => handleRequestAction(request.id, 'approve')}
+                          disabled={actionLoadingId === request.id}
+                          className="flex-1 bg-green-600 hover:bg-green-700 disabled:bg-green-400 text-white text-sm font-medium py-2 rounded-lg"
+                        >
+                          {actionLoadingId === request.id ? 'Working...' : 'Approve'}
+                        </button>
+                        <button
+                          onClick={() => handleRequestAction(request.id, 'reject')}
+                          disabled={actionLoadingId === request.id}
+                          className="flex-1 bg-red-600 hover:bg-red-700 disabled:bg-red-400 text-white text-sm font-medium py-2 rounded-lg"
+                        >
+                          {actionLoadingId === request.id ? 'Working...' : 'Reject'}
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
@@ -371,14 +481,77 @@ export default function DoctorProfilePage() {
                       </p>
                     )}
                   </div>
-                  <button className="mt-4 w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 rounded-lg transition-colors">
-                    View Patient Details
+                  <button
+                    onClick={() => handleViewPatientDetails(patient.id)}
+                    disabled={detailsLoading && selectedPatientCardId === patient.id}
+                    className="mt-4 w-full bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white font-medium py-2 rounded-lg transition-colors"
+                  >
+                    {detailsLoading && selectedPatientCardId === patient.id
+                      ? 'Loading Details...'
+                      : 'View Patient Details'}
                   </button>
                 </div>
               ))}
             </div>
           )}
         </div>
+
+        {selectedPatient && (
+          <div className="mt-8 bg-white rounded-lg shadow p-8">
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-2xl font-bold text-gray-900">Patient Full Details</h2>
+              <button
+                onClick={() => setSelectedPatient(null)}
+                className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div className="p-4 bg-gray-50 rounded-lg">
+                <p className="text-sm text-gray-500">Name</p>
+                <p className="font-semibold text-gray-900">{selectedPatient.name}</p>
+              </div>
+              <div className="p-4 bg-gray-50 rounded-lg">
+                <p className="text-sm text-gray-500">Email</p>
+                <p className="font-semibold text-gray-900 break-all">{selectedPatient.email}</p>
+              </div>
+              <div className="p-4 bg-gray-50 rounded-lg">
+                <p className="text-sm text-gray-500">Age</p>
+                <p className="font-semibold text-gray-900">{selectedPatient.age}</p>
+              </div>
+              <div className="p-4 bg-gray-50 rounded-lg">
+                <p className="text-sm text-gray-500">Phone</p>
+                <p className="font-semibold text-gray-900">{selectedPatient.phone || 'N/A'}</p>
+              </div>
+              <div className="p-4 bg-gray-50 rounded-lg">
+                <p className="text-sm text-gray-500">Emergency Contact</p>
+                <p className="font-semibold text-gray-900">{selectedPatient.emergency_contact || 'N/A'}</p>
+              </div>
+              <div className="p-4 bg-gray-50 rounded-lg">
+                <p className="text-sm text-gray-500">Emergency Phone</p>
+                <p className="font-semibold text-gray-900">{selectedPatient.emergency_phone || 'N/A'}</p>
+              </div>
+              <div className="p-4 bg-gray-50 rounded-lg md:col-span-2">
+                <p className="text-sm text-gray-500">Medical Conditions</p>
+                <p className="font-semibold text-gray-900">
+                  {selectedPatient.medical_conditions?.length
+                    ? selectedPatient.medical_conditions.join(', ')
+                    : 'None reported'}
+                </p>
+              </div>
+              <div className="p-4 bg-gray-50 rounded-lg md:col-span-2">
+                <p className="text-sm text-gray-500">Member Since</p>
+                <p className="font-semibold text-gray-900">
+                  {selectedPatient.created_at
+                    ? new Date(selectedPatient.created_at).toLocaleString()
+                    : 'N/A'}
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

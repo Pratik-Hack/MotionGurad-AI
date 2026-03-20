@@ -33,6 +33,11 @@ class UserRole(str, Enum):
     CAREGIVER = "Caregiver"
     VIEWER = "Viewer"
 
+class ConnectionRequestStatus(str, Enum):
+    PENDING = "Pending"
+    APPROVED = "Approved"
+    REJECTED = "Rejected"
+
 # ─── Auth ──────────────────────────────────────────────────
 class UserLogin(BaseModel):
     email: str
@@ -113,6 +118,29 @@ class PatientUpdate(BaseModel):
     emergency_phone: Optional[str] = None
     phone: Optional[str] = None
     avatar_url: Optional[str] = None
+
+class DoctorDirectoryItem(BaseModel):
+    id: str
+    name: str
+    specialty: str
+    institution: Optional[str] = None
+
+class ConnectionRequestCreate(BaseModel):
+    doctor_id: str
+    note: Optional[str] = None
+
+class ConnectionRequestResponse(BaseModel):
+    id: str
+    patient_id: str
+    patient_name: str
+    patient_email: str
+    doctor_id: str
+    doctor_name: str
+    doctor_specialty: Optional[str] = None
+    note: Optional[str] = None
+    status: ConnectionRequestStatus
+    created_at: str
+    updated_at: str
 
 # ─── Sensor Data ───────────────────────────────────────────
 class AccelerometerData(BaseModel):

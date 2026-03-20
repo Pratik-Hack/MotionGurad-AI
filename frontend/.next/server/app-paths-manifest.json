@@ -1,7 +1,5 @@
 {
+  "/patient/profile/page": "app/patient/profile/page.js",
   "/doctor/dashboard/page": "app/doctor/dashboard/page.js",
-  "/medication/page": "app/medication/page.js",
-  "/patient/dashboard/page": "app/patient/dashboard/page.js",
-  "/live-monitor/page": "app/live-monitor/page.js",
-  "/auth/login/page": "app/auth/login/page.js"
+  "/doctor/profile/page": "app/doctor/profile/page.js"
 }

@@ -1,7 +1,7 @@
 'use client';
 import React, { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { useAuth, PatientProfile } from '@/hooks/useAuth';
+import { useAuth, PatientProfile, DoctorDirectoryItem, ConnectionRequest } from '@/hooks/useAuth';
 import Link from 'next/link';
 
 export default function PatientProfilePage() {
@@ -11,8 +11,13 @@ export default function PatientProfilePage() {
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [submittingRequest, setSubmittingRequest] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  const [availableDoctors, setAvailableDoctors] = useState<DoctorDirectoryItem[]>([]);
+  const [connectionRequests, setConnectionRequests] = useState<ConnectionRequest[]>([]);
+  const [selectedDoctorId, setSelectedDoctorId] = useState('');
+  const [requestNote, setRequestNote] = useState('');
 
   // Edit form state
   const [formData, setFormData] = useState({
@@ -32,6 +37,7 @@ export default function PatientProfilePage() {
     }
 
     fetchPatientProfile();
+    fetchConnectionData();
   }, []);
 
   const fetchPatientProfile = async () => {
@@ -94,6 +100,64 @@ export default function PatientProfilePage() {
       console.error(err);
     } finally {
       setSaving(false);
+    }
+  };
+
+  const fetchConnectionData = async () => {
+    try {
+      const [doctorsRes, requestsRes] = await Promise.all([
+        fetchWithAuth('/api/doctors/directory'),
+        fetchWithAuth('/api/connections/patient/requests'),
+      ]);
+
+      if (doctorsRes.ok) {
+        const doctors = await doctorsRes.json();
+        setAvailableDoctors(doctors);
+      }
+
+      if (requestsRes.ok) {
+        const requests = await requestsRes.json();
+        setConnectionRequests(requests);
+      }
+    } catch (err) {
+      console.error('Failed to load connection data:', err);
+    }
+  };
+
+  const handleSendConnectionRequest = async () => {
+    if (!selectedDoctorId) {
+      setError('Please select a doctor first.');
+      return;
+    }
+
+    setSubmittingRequest(true);
+    setError('');
+    setSuccess('');
+
+    try {
+      const response = await fetchWithAuth('/api/connections/request', {
+        method: 'POST',
+        body: JSON.stringify({
+          doctor_id: selectedDoctorId,
+          note: requestNote.trim() || undefined,
+        }),
+      });
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.detail || 'Failed to send request');
+      }
+
+      setSelectedDoctorId('');
+      setRequestNote('');
+      setSuccess('Connection request sent successfully.');
+      await fetchConnectionData();
+      setTimeout(() => setSuccess(''), 3000);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to send request';
+      setError(message);
+    } finally {
+      setSubmittingRequest(false);
     }
   };
 
@@ -364,22 +428,83 @@ export default function PatientProfilePage() {
               </h3>
               {profile.assigned_doctor ? (
                 <div className="p-4 bg-blue-50 rounded-lg">
-                  <p className="font-semibold text-gray-900 mb-2">
-                    Dr. [Doctor's Name]
-                  </p>
+                  <p className="font-semibold text-gray-900 mb-2">Connected</p>
                   <p className="text-sm text-gray-600 mb-3">
                     Your assigned healthcare provider
                   </p>
-                  <button className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 rounded-lg transition-colors">
-                    Contact Doctor
-                  </button>
+                  <p className="text-sm text-blue-700 break-all">Doctor ID: {profile.assigned_doctor}</p>
                 </div>
               ) : (
-                <div className="p-4 bg-yellow-50 rounded-lg">
-                  <p className="text-sm text-yellow-700">
-                    No doctor assigned yet. Please contact your healthcare
-                    provider to get assigned.
-                  </p>
+                <div className="space-y-4">
+                  <div className="p-4 bg-yellow-50 rounded-lg">
+                    <p className="text-sm text-yellow-700">
+                      No doctor connected yet. Send a connection request and wait for approval.
+                    </p>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Select Doctor</label>
+                    <select
+                      value={selectedDoctorId}
+                      onChange={(e) => setSelectedDoctorId(e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      <option value="">Choose a doctor</option>
+                      {availableDoctors.map((doctor) => (
+                        <option key={doctor.id} value={doctor.id}>
+                          {doctor.name} • {doctor.specialty}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Note (optional)</label>
+                    <textarea
+                      value={requestNote}
+                      onChange={(e) => setRequestNote(e.target.value)}
+                      rows={3}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      placeholder="Add a brief message for the doctor"
+                    />
+                  </div>
+                  <button
+                    onClick={handleSendConnectionRequest}
+                    disabled={submittingRequest}
+                    className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white font-medium py-2 rounded-lg transition-colors"
+                  >
+                    {submittingRequest ? 'Sending...' : 'Send Connection Request'}
+                  </button>
+                </div>
+              )}
+            </div>
+
+            <div className="bg-white rounded-lg shadow p-6">
+              <h3 className="text-lg font-semibold text-gray-900 mb-4">Request History</h3>
+              {connectionRequests.length === 0 ? (
+                <p className="text-sm text-gray-500">No connection requests yet.</p>
+              ) : (
+                <div className="space-y-3 max-h-64 overflow-y-auto pr-1">
+                  {connectionRequests.slice(0, 8).map((request) => (
+                    <div key={request.id} className="p-3 border border-gray-200 rounded-lg">
+                      <p className="text-sm font-semibold text-gray-900">{request.doctor_name}</p>
+                      <p className="text-xs text-gray-500">{request.doctor_specialty || 'Doctor'}</p>
+                      <div className="mt-2 flex items-center justify-between text-xs">
+                        <span
+                          className={`px-2 py-1 rounded-full ${
+                            request.status === 'Approved'
+                              ? 'bg-green-100 text-green-700'
+                              : request.status === 'Rejected'
+                                ? 'bg-red-100 text-red-700'
+                                : 'bg-yellow-100 text-yellow-700'
+                          }`}
+                        >
+                          {request.status}
+                        </span>
+                        <span className="text-gray-500">
+                          {new Date(request.created_at).toLocaleDateString()}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
                 </div>
               )}
             </div>

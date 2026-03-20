@@ -609,6 +609,217 @@ async def get_patient_profile(patient_id: str):
     except:
         raise HTTPException(status_code=404, detail="Patient not found")
 
+
+def _connection_request_response(doc: dict) -> ConnectionRequestResponse:
+    return ConnectionRequestResponse(
+        id=str(doc["_id"]),
+        patient_id=doc["patient_id"],
+        patient_name=doc.get("patient_name", "Unknown Patient"),
+        patient_email=doc.get("patient_email", ""),
+        doctor_id=doc["doctor_id"],
+        doctor_name=doc.get("doctor_name", "Unknown Doctor"),
+        doctor_specialty=doc.get("doctor_specialty"),
+        note=doc.get("note"),
+        status=doc.get("status", ConnectionRequestStatus.PENDING),
+        created_at=doc.get("created_at", datetime.utcnow().isoformat()),
+        updated_at=doc.get("updated_at", datetime.utcnow().isoformat()),
+    )
+
+
+@app.get("/api/doctors/directory")
+async def get_doctors_directory(current_user: dict = Depends(get_current_patient)):
+    db = get_database()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    doctors = await db.users.find(
+        {"role": "Doctor"},
+        {"_id": 1, "name": 1, "specialty": 1, "institution": 1}
+    ).sort("name", 1).to_list(500)
+
+    return [
+        DoctorDirectoryItem(
+            id=str(d["_id"]),
+            name=d.get("name", "Unknown Doctor"),
+            specialty=d.get("specialty", "General"),
+            institution=d.get("institution")
+        )
+        for d in doctors
+    ]
+
+
+@app.post("/api/connections/request")
+async def create_connection_request(
+    payload: ConnectionRequestCreate,
+    current_user: dict = Depends(get_current_patient)
+):
+    db = get_database()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    from bson import ObjectId
+
+    patient = await db.users.find_one({"email": current_user.get("sub"), "role": "Patient"})
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient not found")
+
+    if patient.get("assigned_doctor"):
+        raise HTTPException(status_code=400, detail="Patient already connected to a doctor")
+
+    try:
+        doctor_obj_id = ObjectId(payload.doctor_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid doctor ID")
+
+    doctor = await db.users.find_one({"_id": doctor_obj_id, "role": "Doctor"})
+    if not doctor:
+        raise HTTPException(status_code=404, detail="Doctor not found")
+
+    pending_existing = await db.connection_requests.find_one(
+        {
+            "patient_id": str(patient["_id"]),
+            "doctor_id": payload.doctor_id,
+            "status": ConnectionRequestStatus.PENDING
+        }
+    )
+    if pending_existing:
+        raise HTTPException(status_code=400, detail="A pending request already exists for this doctor")
+
+    now_iso = datetime.utcnow().isoformat()
+    doc = {
+        "patient_id": str(patient["_id"]),
+        "patient_name": patient.get("name", "Unknown Patient"),
+        "patient_email": patient.get("email", ""),
+        "doctor_id": payload.doctor_id,
+        "doctor_name": doctor.get("name", "Unknown Doctor"),
+        "doctor_specialty": doctor.get("specialty"),
+        "note": payload.note,
+        "status": ConnectionRequestStatus.PENDING,
+        "created_at": now_iso,
+        "updated_at": now_iso,
+    }
+    result = await db.connection_requests.insert_one(doc)
+    doc["_id"] = result.inserted_id
+    return _connection_request_response(doc)
+
+
+@app.get("/api/connections/patient/requests")
+async def get_patient_connection_requests(current_user: dict = Depends(get_current_patient)):
+    db = get_database()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    patient = await db.users.find_one({"email": current_user.get("sub"), "role": "Patient"}, {"_id": 1})
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient not found")
+
+    requests = await db.connection_requests.find(
+        {"patient_id": str(patient["_id"])}
+    ).sort("created_at", -1).to_list(200)
+
+    return [_connection_request_response(doc) for doc in requests]
+
+
+@app.get("/api/connections/doctor/requests")
+async def get_doctor_connection_requests(
+    status: Optional[ConnectionRequestStatus] = Query(None),
+    current_user: dict = Depends(get_current_doctor)
+):
+    db = get_database()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    query = {"doctor_id": current_user.get("user_id")}
+    if status is not None:
+        query["status"] = status
+
+    requests = await db.connection_requests.find(query).sort("created_at", -1).to_list(200)
+    return [_connection_request_response(doc) for doc in requests]
+
+
+@app.post("/api/connections/doctor/requests/{request_id}/approve")
+async def approve_connection_request(
+    request_id: str,
+    current_user: dict = Depends(get_current_doctor)
+):
+    db = get_database()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    from bson import ObjectId
+
+    try:
+        request_obj_id = ObjectId(request_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid request ID")
+
+    request_doc = await db.connection_requests.find_one({
+        "_id": request_obj_id,
+        "doctor_id": current_user.get("user_id")
+    })
+    if not request_doc:
+        raise HTTPException(status_code=404, detail="Connection request not found")
+
+    if request_doc.get("status") != ConnectionRequestStatus.PENDING:
+        raise HTTPException(status_code=400, detail="Only pending requests can be approved")
+
+    patient_result = await db.users.update_one(
+        {"_id": ObjectId(request_doc["patient_id"]), "role": "Patient", "assigned_doctor": None},
+        {"$set": {"assigned_doctor": current_user.get("user_id")}}
+    )
+    if patient_result.matched_count == 0:
+        raise HTTPException(status_code=400, detail="Patient is already connected to another doctor")
+
+    now_iso = datetime.utcnow().isoformat()
+    await db.connection_requests.update_many(
+        {
+            "patient_id": request_doc["patient_id"],
+            "status": ConnectionRequestStatus.PENDING
+        },
+        {"$set": {"status": ConnectionRequestStatus.REJECTED, "updated_at": now_iso}}
+    )
+    await db.connection_requests.update_one(
+        {"_id": request_obj_id},
+        {"$set": {"status": ConnectionRequestStatus.APPROVED, "updated_at": now_iso}}
+    )
+
+    updated_doc = await db.connection_requests.find_one({"_id": request_obj_id})
+    return _connection_request_response(updated_doc)
+
+
+@app.post("/api/connections/doctor/requests/{request_id}/reject")
+async def reject_connection_request(
+    request_id: str,
+    current_user: dict = Depends(get_current_doctor)
+):
+    db = get_database()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    from bson import ObjectId
+
+    try:
+        request_obj_id = ObjectId(request_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid request ID")
+
+    request_doc = await db.connection_requests.find_one({
+        "_id": request_obj_id,
+        "doctor_id": current_user.get("user_id")
+    })
+    if not request_doc:
+        raise HTTPException(status_code=404, detail="Connection request not found")
+
+    if request_doc.get("status") != ConnectionRequestStatus.PENDING:
+        raise HTTPException(status_code=400, detail="Only pending requests can be rejected")
+
+    await db.connection_requests.update_one(
+        {"_id": request_obj_id},
+        {"$set": {"status": ConnectionRequestStatus.REJECTED, "updated_at": datetime.utcnow().isoformat()}}
+    )
+    updated_doc = await db.connection_requests.find_one({"_id": request_obj_id})
+    return _connection_request_response(updated_doc)
+
 @app.put("/api/auth/doctor/profile")
 async def update_doctor_profile(
     update: DoctorUpdate,
@@ -745,6 +956,49 @@ async def get_doctor_patients(
         )
         for p in patients
     ]
+
+
+@app.get("/api/doctor/{doctor_id}/patients/{patient_id}")
+async def get_doctor_patient_details(
+    doctor_id: str,
+    patient_id: str,
+    current_user: dict = Depends(get_current_doctor)
+):
+    """Get full profile details for one patient assigned to the doctor."""
+    db = get_database()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    from bson import ObjectId
+
+    if current_user.get("user_id") != doctor_id:
+        raise HTTPException(status_code=403, detail="Cannot view other doctors' patients")
+
+    try:
+        patient_obj_id = ObjectId(patient_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid patient ID")
+
+    patient = await db.users.find_one(
+        {"_id": patient_obj_id, "role": "Patient", "assigned_doctor": doctor_id},
+        {"password_hash": 0}
+    )
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient not found or not assigned to this doctor")
+
+    return PatientProfile(
+        id=str(patient["_id"]),
+        email=patient["email"],
+        name=patient["name"],
+        age=patient.get("age", 0),
+        medical_conditions=patient.get("medical_conditions", []),
+        emergency_contact=patient.get("emergency_contact"),
+        emergency_phone=patient.get("emergency_phone"),
+        phone=patient.get("phone"),
+        avatar_url=patient.get("avatar_url"),
+        assigned_doctor=patient.get("assigned_doctor"),
+        created_at=patient.get("created_at")
+    )
 
 # ─── Patient Endpoints ─────────────────────────────────────
 @app.get("/api/patients")
