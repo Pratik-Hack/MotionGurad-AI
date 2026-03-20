@@ -8,15 +8,13 @@ export default function DoctorProfilePage() {
   const router = useRouter();
   const { user, getToken, fetchWithAuth, logout } = useAuth();
   const [profile, setProfile] = useState<DoctorProfile | null>(null);
-  const [patients, setPatients] = useState<any[]>([]);
+  const [patients, setPatients] = useState<PatientProfile[]>([]);
   const [pendingRequests, setPendingRequests] = useState<ConnectionRequest[]>([]);
   const [selectedPatient, setSelectedPatient] = useState<PatientProfile | null>(null);
-  const [detailsLoading, setDetailsLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
-  const [selectedPatientCardId, setSelectedPatientCardId] = useState<string | null>(null);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
 
@@ -143,33 +141,9 @@ export default function DoctorProfilePage() {
     }
   };
 
-  const handleViewPatientDetails = async (patientId: string) => {
-    try {
-      const current = JSON.parse(localStorage.getItem('user') || '{}');
-      if (!current.id) {
-        setError('Unable to identify doctor account. Please login again.');
-        return;
-      }
-
-      setDetailsLoading(true);
-      setSelectedPatientCardId(patientId);
-      setError('');
-
-      const response = await fetchWithAuth(`/api/doctor/${current.id}/patients/${patientId}`);
-      if (!response.ok) {
-        const data = await response.json().catch(() => ({}));
-        throw new Error(data.detail || 'Failed to load patient details');
-      }
-
-      const data = await response.json();
-      setSelectedPatient(data);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to load patient details';
-      setError(message);
-    } finally {
-      setDetailsLoading(false);
-      setSelectedPatientCardId(null);
-    }
+  const handleViewPatientDetails = (patient: PatientProfile) => {
+    setError('');
+    setSelectedPatient(patient);
   };
 
   if (loading) {
@@ -469,7 +443,7 @@ export default function DoctorProfilePage() {
                     <p className="text-gray-600">
                       <strong>Email:</strong> {patient.email}
                     </p>
-                    {patient.medical_conditions?.length > 0 && (
+                    {Array.isArray(patient.medical_conditions) && patient.medical_conditions.length > 0 && (
                       <p className="text-gray-600">
                         <strong>Conditions:</strong>{' '}
                         {patient.medical_conditions.join(', ')}
@@ -482,13 +456,10 @@ export default function DoctorProfilePage() {
                     )}
                   </div>
                   <button
-                    onClick={() => handleViewPatientDetails(patient.id)}
-                    disabled={detailsLoading && selectedPatientCardId === patient.id}
-                    className="mt-4 w-full bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white font-medium py-2 rounded-lg transition-colors"
+                    onClick={() => handleViewPatientDetails(patient)}
+                    className="mt-4 w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 rounded-lg transition-colors"
                   >
-                    {detailsLoading && selectedPatientCardId === patient.id
-                      ? 'Loading Details...'
-                      : 'View Patient Details'}
+                    View Patient Details
                   </button>
                 </div>
               ))}
@@ -497,57 +468,63 @@ export default function DoctorProfilePage() {
         </div>
 
         {selectedPatient && (
-          <div className="mt-8 bg-white rounded-lg shadow p-8">
-            <div className="flex items-center justify-between mb-6">
-              <h2 className="text-2xl font-bold text-gray-900">Patient Full Details</h2>
-              <button
-                onClick={() => setSelectedPatient(null)}
-                className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
-              >
-                Close
-              </button>
-            </div>
+          <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
+            <div className="bg-white rounded-lg shadow-xl w-full max-w-4xl max-h-[90vh] overflow-y-auto p-8">
+              <div className="flex items-center justify-between mb-6">
+                <h2 className="text-2xl font-bold text-gray-900">Patient Full Details</h2>
+                <button
+                  onClick={() => setSelectedPatient(null)}
+                  className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
+                >
+                  Close
+                </button>
+              </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <div className="p-4 bg-gray-50 rounded-lg">
-                <p className="text-sm text-gray-500">Name</p>
-                <p className="font-semibold text-gray-900">{selectedPatient.name}</p>
-              </div>
-              <div className="p-4 bg-gray-50 rounded-lg">
-                <p className="text-sm text-gray-500">Email</p>
-                <p className="font-semibold text-gray-900 break-all">{selectedPatient.email}</p>
-              </div>
-              <div className="p-4 bg-gray-50 rounded-lg">
-                <p className="text-sm text-gray-500">Age</p>
-                <p className="font-semibold text-gray-900">{selectedPatient.age}</p>
-              </div>
-              <div className="p-4 bg-gray-50 rounded-lg">
-                <p className="text-sm text-gray-500">Phone</p>
-                <p className="font-semibold text-gray-900">{selectedPatient.phone || 'N/A'}</p>
-              </div>
-              <div className="p-4 bg-gray-50 rounded-lg">
-                <p className="text-sm text-gray-500">Emergency Contact</p>
-                <p className="font-semibold text-gray-900">{selectedPatient.emergency_contact || 'N/A'}</p>
-              </div>
-              <div className="p-4 bg-gray-50 rounded-lg">
-                <p className="text-sm text-gray-500">Emergency Phone</p>
-                <p className="font-semibold text-gray-900">{selectedPatient.emergency_phone || 'N/A'}</p>
-              </div>
-              <div className="p-4 bg-gray-50 rounded-lg md:col-span-2">
-                <p className="text-sm text-gray-500">Medical Conditions</p>
-                <p className="font-semibold text-gray-900">
-                  {selectedPatient.medical_conditions?.length
-                    ? selectedPatient.medical_conditions.join(', ')
-                    : 'None reported'}
-                </p>
-              </div>
-              <div className="p-4 bg-gray-50 rounded-lg md:col-span-2">
-                <p className="text-sm text-gray-500">Member Since</p>
-                <p className="font-semibold text-gray-900">
-                  {selectedPatient.created_at
-                    ? new Date(selectedPatient.created_at).toLocaleString()
-                    : 'N/A'}
-                </p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="p-4 bg-gray-50 rounded-lg">
+                  <p className="text-sm text-gray-500">Name</p>
+                  <p className="font-semibold text-gray-900">{selectedPatient.name}</p>
+                </div>
+                <div className="p-4 bg-gray-50 rounded-lg">
+                  <p className="text-sm text-gray-500">Email</p>
+                  <p className="font-semibold text-gray-900 break-all">{selectedPatient.email}</p>
+                </div>
+                <div className="p-4 bg-gray-50 rounded-lg">
+                  <p className="text-sm text-gray-500">Age</p>
+                  <p className="font-semibold text-gray-900">{selectedPatient.age}</p>
+                </div>
+                <div className="p-4 bg-gray-50 rounded-lg">
+                  <p className="text-sm text-gray-500">Phone</p>
+                  <p className="font-semibold text-gray-900">{selectedPatient.phone || 'N/A'}</p>
+                </div>
+                <div className="p-4 bg-gray-50 rounded-lg">
+                  <p className="text-sm text-gray-500">Emergency Contact</p>
+                  <p className="font-semibold text-gray-900">{selectedPatient.emergency_contact || 'N/A'}</p>
+                </div>
+                <div className="p-4 bg-gray-50 rounded-lg">
+                  <p className="text-sm text-gray-500">Emergency Phone</p>
+                  <p className="font-semibold text-gray-900">{selectedPatient.emergency_phone || 'N/A'}</p>
+                </div>
+                <div className="p-4 bg-gray-50 rounded-lg md:col-span-2">
+                  <p className="text-sm text-gray-500">Medical Conditions</p>
+                  <p className="font-semibold text-gray-900">
+                    {selectedPatient.medical_conditions?.length
+                      ? selectedPatient.medical_conditions.join(', ')
+                      : 'None reported'}
+                  </p>
+                </div>
+                <div className="p-4 bg-gray-50 rounded-lg">
+                  <p className="text-sm text-gray-500">Patient ID</p>
+                  <p className="font-semibold text-gray-900 break-all">{selectedPatient.id || 'N/A'}</p>
+                </div>
+                <div className="p-4 bg-gray-50 rounded-lg">
+                  <p className="text-sm text-gray-500">Member Since</p>
+                  <p className="font-semibold text-gray-900">
+                    {selectedPatient.created_at
+                      ? new Date(selectedPatient.created_at).toLocaleString()
+                      : 'N/A'}
+                  </p>
+                </div>
               </div>
             </div>
           </div>

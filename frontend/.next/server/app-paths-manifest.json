@@ -1,5 +1,5 @@
 {
-  "/patient/profile/page": "app/patient/profile/page.js",
   "/doctor/dashboard/page": "app/doctor/dashboard/page.js",
+  "/patient/profile/page": "app/patient/profile/page.js",
   "/doctor/profile/page": "app/doctor/profile/page.js"
 }
