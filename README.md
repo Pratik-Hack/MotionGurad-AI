@@ -207,3 +207,62 @@ The application works in **full demo mode** without MongoDB. When the database i
 ## License
 
 MIT © 2024 MotionGuard AI
+
+---
+
+## Deployment (Vercel + Render)
+
+Use this setup:
+
+- **Frontend (Next.js):** Vercel
+- **Backend (FastAPI):** Render
+- **Database:** MongoDB Atlas
+
+### 1) Deploy Backend on Render
+
+You can use the included `render.yaml` (Blueprint) from repo root.
+
+Required backend environment variables:
+
+- `MONGODB_URL` = your Atlas connection string
+- `SECRET_KEY` = long random string (JWT signing key)
+- `DATABASE_NAME` = `motionguard_ai` (or your choice)
+- `ALGORITHM` = `HS256`
+- `ACCESS_TOKEN_EXPIRE_MINUTES` = `480`
+
+Render start command is already configured as:
+
+`uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+
+After deploy, copy your backend URL, for example:
+
+`https://motionguard-ai-backend.onrender.com`
+
+### 2) Deploy Frontend on Vercel
+
+In Vercel:
+
+1. Import this GitHub repository.
+2. Set **Root Directory** to `frontend`.
+3. Add environment variables:
+   - `NEXT_PUBLIC_API_URL` = your Render backend URL (no trailing slash)
+   - `NEXT_PUBLIC_WS_URL` = backend websocket URL
+     - if backend is `https://...onrender.com` then use `wss://...onrender.com`
+
+Example:
+
+- `NEXT_PUBLIC_API_URL=https://motionguard-ai-backend.onrender.com`
+- `NEXT_PUBLIC_WS_URL=wss://motionguard-ai-backend.onrender.com`
+
+The frontend proxies `/api/*` through `next.config.js` using `NEXT_PUBLIC_API_URL`.
+
+### 3) CORS and Cookies
+
+This backend currently allows broad CORS in app middleware, so frontend-to-backend calls from Vercel work out of the box.
+
+### 4) Post-Deploy Check
+
+- Open Vercel app URL.
+- Register/Login as Doctor and Patient.
+- Send patient connection request and approve from doctor profile.
+- Verify telemetry and analytics pages load.
