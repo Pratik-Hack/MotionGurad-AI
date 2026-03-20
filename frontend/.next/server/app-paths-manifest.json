@@ -1,4 +1,10 @@
 {
-  "/auth/register/page": "app/auth/register/page.js",
-  "/page": "app/page.js"
+  "/ai-summary/page": "app/ai-summary/page.js",
+  "/doctor/dashboard/page": "app/doctor/dashboard/page.js",
+  "/settings/page": "app/settings/page.js",
+  "/patient/dashboard/page": "app/patient/dashboard/page.js",
+  "/medication/page": "app/medication/page.js",
+  "/page": "app/page.js",
+  "/auth/login/page": "app/auth/login/page.js",
+  "/live-monitor/page": "app/live-monitor/page.js"
 }

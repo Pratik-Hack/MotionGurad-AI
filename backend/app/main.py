@@ -16,7 +16,8 @@ from app.database import connect_to_database, close_database_connection, get_dat
 from app.models import *
 from app.auth import (
     hash_password, verify_password, create_access_token,
-    get_current_user, decode_token
+    get_current_user, decode_token,
+    get_current_user_optional, get_current_doctor, get_current_patient
 )
 from app.ml_engine import pipeline
 from app.sensor_simulator import get_simulator
